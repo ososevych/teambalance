@@ -77,7 +77,7 @@ describe("the idle screen", () => {
 
   it("refuses to start with an empty pool, and says why", async () => {
     const root = mount(await openStore({ schemaVersion: 1, players: [], sessions: [] }));
-    expect(root.textContent).toContain("needs players before a session can start");
+    expect(root.textContent).toContain("at least four players");
     expect([...root.querySelectorAll("button")].map((b) => b.textContent)).not.toContain("Start a session");
   });
 });
@@ -178,5 +178,106 @@ describe("write failures", () => {
 
     expect(root.textContent).toContain("Nothing was saved");
     expect(store.snapshot().sessions[0]!.sets).toHaveLength(0);
+  });
+});
+
+describe("player management", () => {
+  const type = (root: HTMLElement, selector: string, value: string): void => {
+    const field = root.querySelector<HTMLInputElement | HTMLTextAreaElement>(selector);
+    if (!field) throw new Error(`no ${selector}`);
+    field.value = value;
+    field.dispatchEvent(new Event("input", { bubbles: true }));
+  };
+
+  it("offers to add players when the pool is empty, instead of a dead end", async () => {
+    const root = mount(await openStore({ schemaVersion: 1, players: [], sessions: [] }));
+    expect(root.textContent).toContain("at least four players");
+    await click(root, "Add players");
+    expect(root.textContent).toContain("Paste names");
+  });
+
+  it("previews a paste before anything is written, and ignores the sheet's furniture", async () => {
+    const store = await openStore({ schemaVersion: 1, players: [], sessions: [] });
+    const root = mount(store);
+    await click(root, "Add players");
+
+    type(root, "textarea", "1. Nameless One\n2. Second Person\n29,17 PLN\nhttps://example.com/x");
+
+    expect(root.textContent).toContain("Will add 2");
+    expect(root.textContent).toContain("Ignored 2 lines");
+    // Still nothing written.
+    expect(store.snapshot().players).toHaveLength(0);
+
+    await click(root, "Add 2 players");
+    expect(store.snapshot().players.map((p) => p.name)).toEqual(["Nameless One", "Second Person"]);
+    // Default starting level is three stars, the middle band.
+    expect(store.snapshot().players.every((p) => p.seedRating === 1500)).toBe(true);
+  });
+
+  it("flags names already in the pool rather than duplicating them", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Manage players");
+    await click(root, "Add players");
+
+    type(root, "textarea", "Andrii\nBrand New");
+    expect(root.textContent).toContain("Already in the pool");
+    await click(root, "Add 1 player");
+    expect(store.snapshot().players.filter((p) => p.name === "Andrii")).toHaveLength(1);
+  });
+
+  it("corrects a starting level and re-settles the history", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Manage players");
+    await click(root, "Kateryna");
+
+    expect(root.textContent).toContain("Starting level");
+    // Kateryna is seeded at three stars; promote the seed to five.
+    const five = [...root.querySelectorAll("button")].find((b) => b.getAttribute("aria-label") === "5 stars");
+    five!.click();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(store.snapshot().players.find((p) => p.id === "kateryna")!.seedRating).toBe(1800);
+  });
+
+  it("renames a player", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Manage players");
+    await click(root, "Vika");
+    type(root, ".card input", "Vika K.");
+    await click(root, "Save name");
+    expect(store.snapshot().players.find((p) => p.id === "vika")!.name).toBe("Vika K.");
+  });
+
+  it("refuses to delete someone who has played, and says what to do instead", async () => {
+    const db = dbWithPool();
+    const store = await openStore(db);
+    const root = mount(store);
+
+    // Play one set so everyone on court has history.
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+    await click(root, "Save set");
+    await click(root, "Pool");
+    await click(root, "Manage players");
+
+    const played = store.snapshot().sessions[0]!.sets[0]!.sideA.players[0] as string;
+    const name = store.snapshot().players.find((p) => p.id === played)!.name;
+    await click(root, name);
+
+    expect(root.textContent).toContain("cannot be deleted");
+    expect(root.textContent).toContain("Mark them inactive");
+    expect([...root.querySelectorAll("button")].some((b) => b.textContent === "Delete")).toBe(false);
+  });
+
+  it("deletes someone who has never played", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Manage players");
+    await click(root, "Ivan");
+    await click(root, "Delete");
+    expect(store.snapshot().players.map((p) => p.id)).not.toContain("ivan");
   });
 });
