@@ -24,6 +24,26 @@ const sessionLabel = (date: Date): string =>
   date.toLocaleDateString(undefined, { weekday: "long", day: "numeric", month: "short" });
 
 /**
+ * A session id is its start time, made unique.
+ *
+ * The timestamp alone is not enough: two sessions started inside the same
+ * millisecond would share an id, and then deleting one would delete both —
+ * which is exactly what happens while rehearsing several practice runs in a
+ * row.
+ */
+const uniqueId = (date: Date, draft: Db): string => {
+  const base = date.toISOString();
+  const taken = new Set(draft.sessions.map((session) => session.id));
+  if (!taken.has(base)) return base;
+  for (let n = 2; ; n += 1) {
+    const candidate = `${base}-${String(n)}`;
+    if (!taken.has(candidate)) return candidate;
+  }
+};
+
+const ISO_PREFIX = /^\d{4}-\d{2}-\d{2}T[\d:.]+Z/;
+
+/**
  * Start a session and its first lineup in ONE write.
  *
  * Attendance is chosen locally first and committed here, rather than writing on
@@ -35,7 +55,7 @@ export const startSession =
   (draft: Db): void => {
     const now = new Date();
     draft.sessions.push({
-      id: now.toISOString(),
+      id: uniqueId(now, draft),
       label: sessionLabel(now),
       playersOnCourt: PLAYERS_ON_COURT,
       attendees: [...attendees],
@@ -115,8 +135,35 @@ export const reopenLastSession =
   (draft: Db): void => {
     const last = draft.sessions[draft.sessions.length - 1];
     if (!last) throw new Error("no session to reopen");
+    if (openSessionOf(draft)) throw new Error("a session is already open");
     last.closedAt = null;
   };
+
+/**
+ * Delete a session outright.
+ *
+ * Safe because ratings are derived by replaying the set log (ADR 0002): the
+ * session's effect disappears completely, including from the stateful star
+ * bands, which are replayed from the remaining boundaries. This is what makes
+ * a throwaway practice run throwaway.
+ */
+export const deleteSession =
+  (id: string) =>
+  (draft: Db): void => {
+    const before = draft.sessions.length;
+    draft.sessions = draft.sessions.filter((session) => session.id !== id);
+    if (draft.sessions.length === before) throw new Error(`unknown session "${id}"`);
+  };
+
+/** Label plus start time, so several runs on one afternoon are distinguishable. */
+export const sessionTime = (session: Session): string => {
+  const iso = ISO_PREFIX.exec(session.id)?.[0];
+  if (iso === undefined) return "";
+  const date = new Date(iso);
+  return Number.isNaN(date.getTime())
+    ? ""
+    : date.toLocaleTimeString(undefined, { hour: "2-digit", minute: "2-digit" });
+};
 
 export const deleteLastSet =
   () =>

@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   appendLineup,
   closeSession,
+  deleteSession,
   currentLineupOf,
   deleteLastSet,
   openSessionOf,
@@ -9,6 +10,7 @@ import {
   reopenLastSession,
   replaceCurrentLineup,
   setAttendance,
+  sessionTime,
   setsForLineup,
   startSession,
 } from "./session.js";
@@ -170,5 +172,127 @@ describe("closing", () => {
     const db = emptyDb();
     expect(() => recordSet(25, 20)(db)).toThrow(/no open session/);
     expect(() => closeSession()(db)).toThrow(/no open session/);
+  });
+});
+
+describe("deleting a session", () => {
+  // The property that makes a practice run genuinely throwaway.
+  const poolDb = (): Db => ({
+    schemaVersion: 1,
+    players: ELEVEN.map((id) => ({ id, name: id.toUpperCase(), active: true, seedRating: 1500 })),
+    sessions: [],
+  });
+
+  const playFullSession = (db: Db, scores: Array<[number, number]>, close: boolean): void => {
+    startSession(ELEVEN, { sideA: ["a", "b", "c", "d", "e", "f"], sideB: ["g", "h", "i", "j", "k"] })(db);
+    scores.forEach(([x, y], index) => {
+      if (index === 2) appendLineup(["a", "b", "c", "g", "h", "i"], ["d", "e", "f", "j", "k"], "rebalanced")(db);
+      recordSet(x, y)(db);
+    });
+    if (close) closeSession()(db);
+  };
+
+  it("restores every standing exactly, not approximately", () => {
+    const db = poolDb();
+    const before = replay(db);
+
+    playFullSession(db, [[25, 20], [25, 8], [18, 25], [25, 23]], true);
+    const during = replay(db);
+    expect(during.get("a")!.rating).not.toBe(before.get("a")!.rating);
+
+    deleteSession(db.sessions[0]!.id)(db);
+    const after = replay(db);
+
+    for (const id of ELEVEN) {
+      expect(after.get(id)).toEqual(before.get(id));
+    }
+  });
+
+  it("leaves no residue in the stateful star state", () => {
+    const db = poolDb();
+    // A collapse heavy enough to arm a pending demotion, then closed.
+    playFullSession(db, [[8, 25], [8, 25], [8, 25], [8, 25], [8, 25], [8, 25]], true);
+    const armed = replay(db);
+    expect(armed.get("a")!.demotionPending + armed.get("g")!.demotionPending).toBeGreaterThan(0);
+
+    deleteSession(db.sessions[0]!.id)(db);
+    for (const id of ELEVEN) {
+      expect(replay(db).get(id)).toEqual({ rating: 1500, setsPlayed: 0, stars: 3, demotionPending: 0 });
+    }
+  });
+
+  it("re-settles later sessions when one in the middle is removed", () => {
+    // The later sets were rated against ratings the deleted session had moved,
+    // so their expectations have to be recomputed, not just shifted.
+    const both = poolDb();
+    playFullSession(both, [[25, 10], [25, 12]], true);
+    const firstId = both.sessions[0]!.id;
+    playFullSession(both, [[25, 20], [22, 25]], true);
+    deleteSession(firstId)(both);
+
+    const onlySecond = poolDb();
+    playFullSession(onlySecond, [[25, 20], [22, 25]], true);
+
+    for (const id of ELEVEN) {
+      expect(replay(both).get(id)!.rating).toBe(replay(onlySecond).get(id)!.rating);
+    }
+  });
+
+  it("can delete an open session mid-flow", () => {
+    const db = poolDb();
+    playFullSession(db, [[25, 20]], false);
+    expect(openSessionOf(db)).toBeDefined();
+    deleteSession(db.sessions[0]!.id)(db);
+    expect(openSessionOf(db)).toBeUndefined();
+    expect(db.sessions).toHaveLength(0);
+  });
+
+  it("refuses to delete a session that does not exist", () => {
+    const db = poolDb();
+    expect(() => deleteSession("nope")(db)).toThrow(/unknown session/);
+  });
+});
+
+describe("reopening", () => {
+  it("refuses while another session is open", () => {
+    const db: Db = {
+      schemaVersion: 1,
+      players: ELEVEN.map((id) => ({ id, name: id.toUpperCase(), active: true, seedRating: 1500 })),
+      sessions: [],
+    };
+    startSession(["a", "b", "c", "d"], { sideA: ["a", "b"], sideB: ["c", "d"] })(db);
+    closeSession()(db);
+    startSession(["a", "b", "c", "d"], { sideA: ["a", "c"], sideB: ["b", "d"] })(db);
+    expect(() => reopenLastSession()(db)).toThrow(/already open/);
+  });
+});
+
+describe("session ids", () => {
+  it("are unique even for sessions started in the same millisecond", () => {
+    // Otherwise deleting one practice run would delete the other.
+    const db: Db = {
+      schemaVersion: 1,
+      players: ELEVEN.map((id) => ({ id, name: id.toUpperCase(), active: true, seedRating: 1500 })),
+      sessions: [],
+    };
+    for (let i = 0; i < 3; i += 1) {
+      startSession(["a", "b", "c", "d"], { sideA: ["a", "b"], sideB: ["c", "d"] })(db);
+      closeSession()(db);
+    }
+    expect(new Set(db.sessions.map((s) => s.id)).size).toBe(3);
+  });
+
+  it("still yields a readable start time once suffixed", () => {
+    const db: Db = {
+      schemaVersion: 1,
+      players: ELEVEN.map((id) => ({ id, name: id.toUpperCase(), active: true, seedRating: 1500 })),
+      sessions: [],
+    };
+    startSession(["a", "b", "c", "d"], { sideA: ["a", "b"], sideB: ["c", "d"] })(db);
+    closeSession()(db);
+    startSession(["a", "b", "c", "d"], { sideA: ["a", "b"], sideB: ["c", "d"] })(db);
+    for (const session of db.sessions) {
+      expect(sessionTime(session)).toMatch(/\d/);
+    }
   });
 });

@@ -23,7 +23,10 @@ import {
   closeSession,
   currentLineupOf,
   deleteLastSet,
+  deleteSession,
   openSessionOf,
+  reopenLastSession,
+  sessionTime,
   PLAYERS_ON_COURT,
   recordSet,
   replaceCurrentLineup,
@@ -43,7 +46,9 @@ import {
 interface UiState {
   tab: "court" | "pool" | "tonight";
   /** Player management sits outside the session tabs. */
-  view: "session" | "players" | "add-players";
+  view: "session" | "players" | "add-players" | "sessions";
+  /** Session awaiting a delete confirmation, so one mis-tap cannot wipe results. */
+  confirmDelete: string | null;
   /** The player whose detail panel is open, if any. */
   editing: PlayerId | null;
   /** Starting stars chosen for a pending paste. */
@@ -73,6 +78,7 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
   const ui: UiState = {
     tab: "court",
     view: "session",
+    confirmDelete: null,
     editing: null,
     pasteStars: 3,
     pasteText: "",
@@ -225,6 +231,18 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
         render();
       }),
     );
+    if (db.sessions.length > 0) {
+      pad.append(
+        button(
+          `<button class="cta ghost">Sessions (${String(db.sessions.length)})</button>`,
+          () => {
+            ui.view = "sessions";
+            ui.confirmDelete = null;
+            render();
+          },
+        ),
+      );
+    }
     pad.append(tools());
     return screen;
   };
@@ -623,6 +641,12 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
         ui.endedSessionId = null;
         render();
       }),
+      button(`<button class="cta ghost">Delete this session</button>`, () => {
+        ui.endedSessionId = null;
+        ui.view = "sessions";
+        ui.confirmDelete = id;
+        render();
+      }),
     );
     return screen;
   };
@@ -860,6 +884,111 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
     return screen;
   };
 
+  /**
+   * Every session, with delete and reopen.
+   *
+   * Deleting is safe in a way that is worth stating: ratings are replayed from
+   * the set log, so a deleted session leaves nothing behind — which is what
+   * makes a practice run genuinely throwaway.
+   */
+  const screenSessions = (db: Db, standings: Standings): HTMLElement => {
+    const screen = el<HTMLElement>(`<div class="phone"></div>`);
+    const head = el<HTMLElement>(`<div class="shead"><span class="t">Sessions</span></div>`);
+    head.append(
+      button(`<button>Done</button>`, () => {
+        ui.view = "session";
+        ui.confirmDelete = null;
+        render();
+      }),
+    );
+    screen.append(head);
+
+    const scroll = el<HTMLElement>(`<div class="scroll"><div class="pad"></div></div>`);
+    const pad = scroll.firstElementChild as HTMLElement;
+
+    if (db.sessions.length === 0) {
+      pad.append(el(`<div class="muted">No sessions yet.</div>`));
+      screen.append(scroll);
+      return screen;
+    }
+
+    pad.append(
+      el(`<p class="muted" style="margin:0;font-size:var(--step--1)">Deleting a session removes its
+          results completely — every rating and star goes back to exactly what it was. That is how
+          a practice run is thrown away.</p>`),
+    );
+
+    const totalSets = db.sessions.reduce((t, s2) => t + s2.sets.length, 0);
+    pad.append(
+      el(`<div class="eyebrow">${String(db.sessions.length)} ${
+        db.sessions.length === 1 ? "session" : "sessions"
+      } · ${String(totalSets)} sets · ${String(standings.size)} players</div>`),
+    );
+
+    for (const session of [...db.sessions].reverse()) {
+      const time = sessionTime(session);
+      const card = el<HTMLElement>(`<div class="lineupcard">
+          <header>
+            <span class="eyebrow">${text(session.label)}${time ? ` · ${time}` : ""} ${
+              session.closedAt === null ? "· OPEN" : ""
+            }</span>
+            <span class="vs">${String(session.sets.length)} ${
+              session.sets.length === 1 ? "set" : "sets"
+            } · ${String(session.lineups.length)} ${
+              session.lineups.length === 1 ? "lineup" : "lineups"
+            } · ${String(session.attendees.length)} players</span>
+          </header>
+        </div>`);
+
+      const actions = el<HTMLElement>(`<div class="row" style="padding:10px 12px"></div>`);
+
+      const isLast = db.sessions[db.sessions.length - 1]?.id === session.id;
+      if (session.closedAt !== null && isLast && !openSessionOf(db)) {
+        actions.append(
+          button(`<button>Reopen</button>`, () => {
+            void (async () => {
+              if (await commit("Reopening", reopenLastSession(), `Reopen ${session.label}`)) {
+                ui.view = "session";
+                ui.tab = "court";
+                render();
+              }
+            })();
+          }),
+        );
+      }
+
+      if (ui.confirmDelete === session.id) {
+        actions.append(
+          button(`<button class="primary">Really delete</button>`, () => {
+            void (async () => {
+              if (await commit("Deleting the session", deleteSession(session.id), `Delete ${session.label}`)) {
+                ui.confirmDelete = null;
+                render();
+              }
+            })();
+          }),
+          button(`<button>Keep</button>`, () => {
+            ui.confirmDelete = null;
+            render();
+          }),
+        );
+      } else {
+        actions.append(
+          button(`<button>Delete</button>`, () => {
+            ui.confirmDelete = session.id;
+            render();
+          }),
+        );
+      }
+
+      card.append(actions);
+      pad.append(card);
+    }
+
+    screen.append(scroll);
+    return screen;
+  };
+
   const shell = (): { screen: HTMLElement; pad: HTMLElement } => {
     const screen = el<HTMLElement>(`<div class="phone"><div class="pad"></div></div>`);
     return { screen, pad: screen.firstElementChild as HTMLElement };
@@ -873,7 +1002,9 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
     const session = openSessionOf(db);
 
     let screen: HTMLElement;
-    if (ui.view === "add-players") {
+    if (ui.view === "sessions") {
+      screen = screenSessions(db, standings);
+    } else if (ui.view === "add-players") {
       screen = screenAddPlayers(db);
     } else if (ui.view === "players") {
       screen = screenPlayers(db, standings);
