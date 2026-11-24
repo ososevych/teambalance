@@ -1,5 +1,6 @@
 import { generateSplits, movedPlayers, type Candidate } from "../core/balance.js";
-import { effectiveStrength, mean, missingPlayers, onCourt } from "../core/rating.js";
+import { TOLERANCE } from "../core/constants.js";
+import { effectiveStrength, expectedScore, mean, missingPlayers, onCourt } from "../core/rating.js";
 import { starString } from "../core/stars.js";
 import type { Db, Player, PlayerId, Session, Standings } from "../core/types.js";
 import { replay } from "../core/replay.js";
@@ -364,6 +365,14 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
     return screen;
   };
 
+  /**
+   * One side of the court.
+   *
+   * Rosters are ordered by star band, then alphabetically. Sorting by rating
+   * would be more useful to the organizer but would leak the within-band
+   * ordering that stars exist to hide, and ordering by stars reveals nothing a
+   * player cannot already see.
+   */
   const half = (
     db: Db,
     label: string,
@@ -372,19 +381,33 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
     session: Session,
     moved: PlayerId[],
     cls: string,
+    standings: Standings,
+    favoured: boolean,
   ): HTMLElement => {
     const ownCourt = onCourt(side.length, session.playersOnCourt);
     const otherCourt = onCourt(other.length, session.playersOnCourt);
     const short = missingPlayers(ownCourt, otherCourt) > 0;
-    const note = short
-      ? `<span class="short-badge">a player down</span>`
-      : `${String(ownCourt)} v ${String(otherCourt)}${side.length > ownCourt ? " · rotating" : ""}`;
+
+    const notes: string[] = [];
+    if (favoured) notes.push(`<span class="fav-badge">stronger</span>`);
+    if (short) notes.push(`<span class="short-badge">a player down</span>`);
+    else if (side.length > ownCourt) notes.push(`<span class="muted">${String(side.length)} rotating</span>`);
+
+    const starsOf = (id: PlayerId): number => standings.get(id)?.stars ?? 3;
+    const ordered = [...side].sort(
+      (x, y) => starsOf(y) - starsOf(x) || nameOf(db, x).localeCompare(nameOf(db, y)),
+    );
+
     return el(`<div class="half ${cls}">
-        <div class="label"><span>${label}</span><span>${note}</span></div>
-        <ul>${side
+        <div class="label"><span>${label}</span><span class="notes">${notes.join(" ")}</span></div>
+        <ul class="roster">${ordered
           .map(
-            (id) =>
-              `<li>${text(nameOf(db, id))}${moved.includes(id) ? ' <span class="moved">moved</span>' : ""}</li>`,
+            (id) => `<li>
+              <span class="n">${text(nameOf(db, id))}${
+                moved.includes(id) ? ' <span class="moved">moved</span>' : ""
+              }</span>
+              <span class="stars">${starString(starsOf(id))}</span>
+            </li>`,
           )
           .join("")}</ul>
       </div>`);
@@ -405,18 +428,31 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
         mean(ratingsOf(side)),
         missingPlayers(onCourt(side.length, session.playersOnCourt), onCourt(other.length, session.playersOnCourt)),
       );
-    const gap = Math.abs(strength(lineup.sideA, lineup.sideB) - strength(lineup.sideB, lineup.sideA));
+    const strengthA = strength(lineup.sideA, lineup.sideB);
+    const strengthB = strength(lineup.sideB, lineup.sideA);
+    const gap = Math.abs(strengthA - strengthB);
+
+    // "Even" means even by the balancer's own standard: inside the tolerance
+    // band from #8, which is less than one set's rating movement, so calling it
+    // a difference would be claiming more precision than the ratings have.
+    const even = gap <= TOLERANCE;
+    const goldFavoured = !even && strengthA > strengthB;
+    const navyFavoured = !even && strengthB > strengthA;
+    const chance = Math.round(100 * Math.max(expectedScore(strengthA, strengthB), expectedScore(strengthB, strengthA)));
+    const verdict = even
+      ? "even match"
+      : `${goldFavoured ? "Gold" : "Navy"} stronger · ${String(chance)}%`;
 
     const court = el<HTMLElement>(`<div class="court"></div>`);
-    court.append(half(db, "Gold", lineup.sideA, lineup.sideB, session, moved, "side-gold"));
+    court.append(half(db, "Gold", lineup.sideA, lineup.sideB, session, moved, "side-gold", standings, goldFavoured));
     court.append(
       el(`<div class="net">
           <span class="sc">${String(ui.draft.a)} &ndash; ${String(ui.draft.b)}</span>
-          <span class="meta">teams ${String(lineup.seq)} · gap ${gap.toFixed(0)} pts<br />
-            ${String(played)} ${played === 1 ? "set" : "sets"} on these teams</span>
+          <span class="meta">${verdict}<br />
+            teams ${String(lineup.seq)} · ${String(played)} ${played === 1 ? "set" : "sets"}</span>
         </div>`),
     );
-    court.append(half(db, "Navy", lineup.sideB, lineup.sideA, session, moved, "side-navy"));
+    court.append(half(db, "Navy", lineup.sideB, lineup.sideA, session, moved, "side-navy", standings, navyFavoured));
     wrap.append(court);
 
     const sheet = el<HTMLElement>(`<div class="sheet"></div>`);

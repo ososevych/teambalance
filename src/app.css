@@ -365,26 +365,62 @@ code {
   letter-spacing: 0.1em;
 }
 
-.half ul {
-  margin: 6px 0 0;
+.half .roster {
+  margin: 8px 0 0;
   padding: 0;
   list-style: none;
-  display: flex;
-  flex-wrap: wrap;
-  gap: 2px 14px;
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px 12px;
+  align-content: start;
 }
 
-.half li {
-  font-size: var(--step-2);
+.half .roster li {
+  display: grid;
+  gap: 0;
+  min-width: 0;
+}
+
+.half .roster .n {
+  font-size: var(--step-1);
   font-weight: 700;
-  letter-spacing: -0.02em;
+  letter-spacing: -0.015em;
+  line-height: 1.15;
+  overflow-wrap: break-word;
 }
 
-.half li .moved {
+.half .roster .stars {
+  font-size: 0.68rem;
+  letter-spacing: 0.04em;
+  line-height: 1.1;
+}
+
+.half .roster .moved {
   color: var(--warn);
   font-size: var(--step--1);
-  vertical-align: 0.35em;
+  vertical-align: 0.1em;
   font-weight: 700;
+}
+
+.half .notes {
+  display: flex;
+  gap: 6px;
+  align-items: center;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+
+/* The stronger side, marked where the eye already is rather than only in the
+   net bar. Uses the team's own colour so it reads as part of that half. */
+.fav-badge {
+  font-size: var(--step--1);
+  font-weight: 800;
+  color: var(--ground);
+  background: var(--team);
+  border-radius: 999px;
+  padding: 0.1rem 0.5rem;
+  white-space: nowrap;
+  letter-spacing: 0.06em;
 }
 
 .short-badge {

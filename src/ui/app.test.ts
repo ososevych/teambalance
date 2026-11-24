@@ -334,6 +334,104 @@ describe("throwing away a practice run", () => {
     await click(root, "Reopen");
     expect(store.snapshot().sessions[0]!.closedAt).toBeNull();
     // Back on the court, with the set still there.
-    expect(root.textContent).toContain("1 set on these teams");
+    expect(root.textContent).toContain("teams 1 · 1 set");
+  });
+});
+
+describe("reading the court", () => {
+  /** A pool where one split is clearly lopsided and another is clearly even. */
+  const lopsided = (): Db => ({
+    schemaVersion: 1,
+    players: [
+      ["strong-a", 1800],
+      ["strong-b", 1800],
+      ["weak-a", 1200],
+      ["weak-b", 1200],
+    ].map(([id, seed]) => ({
+      id: id as string,
+      name: (id as string).toUpperCase(),
+      active: true,
+      seedRating: seed as number,
+    })),
+    sessions: [],
+  });
+
+  it("names which side is stronger instead of only showing a gap", async () => {
+    const store = await openStore(lopsided());
+    const root = mount(store);
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+
+    // The balancer pairs a strong with a weak player, so this split is even.
+    expect(root.textContent).toContain("even match");
+    expect(root.textContent).not.toContain("stronger ·");
+  });
+
+  it("says which side and by what chance when a split is lopsided", async () => {
+    const store = await openStore(lopsided());
+    const root = mount(store);
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+
+    // Force a stacked lineup: both strong players on Gold.
+    await store.commit((draft) => {
+      const lineup = draft.sessions[0]!.lineups[0]!;
+      lineup.sideA = ["strong-a", "strong-b"];
+      lineup.sideB = ["weak-a", "weak-b"];
+    }, "stack the teams");
+    mount(store);
+    const stacked = document.body.firstElementChild as HTMLElement;
+
+    expect(stacked.textContent).toContain("Gold stronger");
+    expect(stacked.textContent).toMatch(/\d\d%/);
+    // And marked on the half itself, where the eye already is.
+    expect(stacked.querySelector(".side-gold .fav-badge")).not.toBeNull();
+    expect(stacked.querySelector(".side-navy .fav-badge")).toBeNull();
+  });
+
+  it("marks Navy when Navy is the stronger side, so Gold is not assumed", async () => {
+    const store = await openStore(lopsided());
+    const root = mount(store);
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+
+    await store.commit((draft) => {
+      const lineup = draft.sessions[0]!.lineups[0]!;
+      lineup.sideA = ["weak-a", "weak-b"];
+      lineup.sideB = ["strong-a", "strong-b"];
+    }, "stack the other way");
+    mount(store);
+    const stacked = document.body.firstElementChild as HTMLElement;
+
+    expect(stacked.textContent).toContain("Navy stronger");
+    expect(stacked.querySelector(".side-navy .fav-badge")).not.toBeNull();
+    expect(stacked.querySelector(".side-gold .fav-badge")).toBeNull();
+  });
+
+  it("orders each roster by star band, strongest first", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+
+    for (const side of root.querySelectorAll(".half .roster")) {
+      const bands = [...side.querySelectorAll("li .stars")].map(
+        (node) => (node.textContent ?? "").split("☆")[0]!.length,
+      );
+      const sorted = [...bands].sort((x, y) => y - x);
+      expect(bands).toEqual(sorted);
+    }
+  });
+
+  it("shows a star row for every player on court", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+
+    const names = root.querySelectorAll(".half .roster li .n").length;
+    const stars = root.querySelectorAll(".half .roster li .stars").length;
+    expect(names).toBe(11);
+    expect(stars).toBe(11);
   });
 });
