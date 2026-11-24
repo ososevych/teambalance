@@ -1,14 +1,13 @@
 import { DATA_REPO } from "./config.js";
-import { clearToken, getToken, loadDocument, setToken, StorageError } from "./storage/github.js";
-import { replay } from "./core/replay.js";
+import { clearAvatarCache, clearToken, getToken, loadAvatars, setToken, StorageError } from "./storage/github.js";
+import { runConflictCheck, runWriteCheck, type CheckResult } from "./storage/selfcheck.js";
+import { Store } from "./storage/store.js";
 import { starString } from "./core/stars.js";
-import type { Db } from "./core/types.js";
 
 /**
- * The shell for #11: token entry, and a read of the data document.
+ * The shell. Token entry (#11) and the write-path self-check (#12).
  *
- * The session flow (court, pool, tonight) is #14. This exists to prove the
- * deployed site opens on a phone, accepts a token, and reaches the data repo.
+ * The session flow — court, pool, tonight — is #14 and replaces this screen.
  */
 
 const app = document.getElementById("app");
@@ -20,10 +19,14 @@ const el = <T extends HTMLElement>(html: string): T => {
   return host.firstElementChild as T;
 };
 
+const phone = (): { screen: HTMLElement; pad: HTMLElement } => {
+  const screen = el<HTMLElement>(`<div class="phone"><div class="pad"></div></div>`);
+  return { screen, pad: screen.firstElementChild as HTMLElement };
+};
+
 function renderTokenScreen(error?: string): void {
   app!.replaceChildren();
-  const screen = el(`<div class="phone"><div class="pad"></div></div>`);
-  const pad = screen.firstElementChild as HTMLElement;
+  const { screen, pad } = phone();
 
   pad.append(
     el(`<div><div class="eyebrow">teambalance</div><h1>Paste your access token</h1></div>`),
@@ -70,44 +73,81 @@ function renderTokenScreen(error?: string): void {
   input.focus();
 }
 
-function renderConnected(db: Db, sha: string | null): void {
+function renderConnected(store: Store, avatarCount: number): void {
   app!.replaceChildren();
-  const standings = replay(db);
-  const screen = el(`<div class="phone"><div class="pad"></div></div>`);
-  const pad = screen.firstElementChild as HTMLElement;
+  const { screen, pad } = phone();
+  const db = store.snapshot();
+  const standings = store.standings();
 
   pad.append(
     el(`<div><div class="eyebrow">teambalance</div><h1>Connected</h1></div>`),
     el(`<div class="notice ok">Reached <code>${DATA_REPO.owner}/${DATA_REPO.repo}</code>.
-        ${sha === null ? "No data document yet — that is the normal first run." : "Data document loaded."}</div>`),
+        ${store.isFirstRun ? "No data document yet — that is the normal first run." : "Data document loaded."}</div>`),
     el(`<div class="card">
         <h2>What is in there</h2>
         <div><span class="num">${String(db.players.length)}</span> players ·
              <span class="num">${String(db.sessions.length)}</span> sessions ·
-             <span class="num">${String(db.sessions.reduce((t, s) => t + s.sets.length, 0))}</span> sets</div>
+             <span class="num">${String(db.sessions.reduce((t, s) => t + s.sets.length, 0))}</span> sets ·
+             <span class="num">${String(avatarCount)}</span> photos</div>
       </div>`),
   );
 
   if (db.players.length > 0) {
     const list = el(`<div class="card"><h2>Pool</h2></div>`);
     for (const player of db.players) {
-      const standing = standings.get(player.id);
       list.append(
         el(`<div style="display:flex;gap:10px;align-items:baseline">
             <span>${player.name}</span>
-            <span style="margin-left:auto;color:var(--gold)">${starString(standing?.stars ?? 3)}</span>
+            <span style="margin-left:auto;color:var(--gold)">${starString(standings.get(player.id)?.stars ?? 3)}</span>
           </div>`),
       );
     }
     pad.append(list);
   }
 
+  // The write path, provable from the phone it has to work on.
+  const checks = el(`<div class="card">
+      <h2>Storage check</h2>
+      <p class="muted" style="margin:0;font-size:var(--step--1)">Writes to
+        <code>${DATA_REPO.diagnosticsPath}</code>, not your real data.</p>
+    </div>`);
+  const result = el<HTMLElement>(`<div></div>`);
+
+  const run = async (label: string, check: () => Promise<CheckResult>, button: HTMLButtonElement) => {
+    button.disabled = true;
+    result.replaceChildren(el(`<div class="muted">${label}…</div>`));
+    try {
+      const outcome = await check();
+      result.replaceChildren(
+        el(`<div class="notice ${outcome.ok ? "ok" : ""}">
+            <strong>${outcome.headline}</strong><br />
+            <span class="muted">${outcome.detail}</span>
+          </div>`),
+      );
+    } catch (error) {
+      const message = error instanceof StorageError ? error.message : "Something went wrong.";
+      result.replaceChildren(el(`<div class="notice"><strong>Check failed</strong><br /><span class="muted">${message}</span></div>`));
+    } finally {
+      button.disabled = false;
+    }
+  };
+
+  const writeBtn = el<HTMLButtonElement>(`<button class="cta ghost">Write and read back</button>`);
+  writeBtn.addEventListener("click", () => void run("Writing", () => runWriteCheck(getToken()!), writeBtn));
+
+  const conflictBtn = el<HTMLButtonElement>(`<button class="cta ghost">Force a stale write</button>`);
+  conflictBtn.addEventListener("click", () => void run("Sending a stale write", () => runConflictCheck(getToken()!), conflictBtn));
+
+  checks.append(writeBtn, conflictBtn, result);
+  pad.append(checks);
+
   pad.append(el(`<p class="muted" style="margin:0">The session flow lands here next. Until then this
-      screen only proves the connection works.</p>`));
+      screen only proves the connection and the write path.</p>`));
 
   const forget = el<HTMLButtonElement>(`<button class="cta ghost">Forget this token</button>`);
   forget.addEventListener("click", () => {
     clearToken();
+    clearAvatarCache();
     renderTokenScreen();
   });
   pad.append(forget);
@@ -115,9 +155,9 @@ function renderConnected(db: Db, sha: string | null): void {
   app!.append(screen);
 }
 
-function renderLoading(): void {
+const renderLoading = (): void => {
   app!.replaceChildren(el(`<div class="phone"><div class="pad"><p class="muted">Loading…</p></div></div>`));
-}
+};
 
 async function boot(): Promise<void> {
   const token = getToken();
@@ -128,11 +168,12 @@ async function boot(): Promise<void> {
 
   renderLoading();
   try {
-    const { db, sha } = await loadDocument(token);
-    renderConnected(db, sha);
+    const store = await Store.open(token);
+    const avatars = await loadAvatars(token);
+    renderConnected(store, Object.keys(avatars).length);
   } catch (error) {
     // Never fail quietly: an app that looks empty when it is actually broken is
-    // the one thing that must not happen at the hall (#12).
+    // the one thing that must not happen at the hall.
     const message =
       error instanceof StorageError
         ? error.message
