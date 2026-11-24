@@ -15,6 +15,11 @@ export const DATA_REPO = {
   path: "db.json",
   /** Avatars, kept separate so they are never part of a write (#9). */
   avatarsPath: "avatars.json",
+  /**
+   * Scratch file for the write-path self-check. Deliberately not `db.json`:
+   * proving the write path should not put a diagnostic marker in the real data.
+   */
+  diagnosticsPath: "diagnostics.json",
   branch: "main",
 } as const;
 
