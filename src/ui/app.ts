@@ -9,6 +9,16 @@ import type { Store } from "../storage/store.js";
 import { avatarHtml } from "./avatar.js";
 import { button, el, text } from "./dom.js";
 import {
+  addPlayers,
+  parseRoster,
+  removePlayer,
+  renamePlayer,
+  seedStarsOf,
+  setPlayerActive,
+  setSeedStars,
+  setsPlayedBy,
+} from "./roster.js";
+import {
   appendLineup,
   closeSession,
   currentLineupOf,
@@ -32,6 +42,13 @@ import {
 
 interface UiState {
   tab: "court" | "pool" | "tonight";
+  /** Player management sits outside the session tabs. */
+  view: "session" | "players" | "add-players";
+  /** The player whose detail panel is open, if any. */
+  editing: PlayerId | null;
+  /** Starting stars chosen for a pending paste. */
+  pasteStars: number;
+  pasteText: string;
   query: string;
   draft: { a: number; b: number };
   /** Attendance is picked locally, then committed in one write. */
@@ -55,6 +72,10 @@ export interface MountOptions {
 export function mountApp({ root, store, avatars, token, onForgetToken }: MountOptions): void {
   const ui: UiState = {
     tab: "court",
+    view: "session",
+    editing: null,
+    pasteStars: 3,
+    pasteText: "",
     query: "",
     draft: { a: 25, b: 20 },
     picking: null,
@@ -178,14 +199,28 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
     );
 
     if (db.players.length < 4) {
-      pad.append(el(`<div class="notice">The pool needs players before a session can start.
-          Seeding it — names, stars and photos — is the next ticket.</div>`));
+      pad.append(
+        el(`<div class="notice">The pool needs at least four players before a session can start.</div>`),
+        button(`<button class="cta">Add players</button>`, () => {
+          ui.view = "add-players";
+          ui.pasteText = "";
+          render();
+        }),
+      );
+      pad.append(tools());
       return screen;
     }
 
     pad.append(
       button(`<button class="cta">Start a session</button>`, () => {
         ui.picking = new Set(db.players.filter((p) => p.active).map((p) => p.id));
+        ui.query = "";
+        render();
+      }),
+    );
+    pad.append(
+      button(`<button class="cta ghost">Manage players</button>`, () => {
+        ui.view = "players";
         ui.query = "";
         render();
       }),
@@ -483,8 +518,15 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
         ),
       );
     }
-    pad.append(el(`<div class="muted" style="font-size:var(--step--1)">Stars are all a player is ever
-        shown. Changing who is here does not re-make the teams on its own.</div>`));
+    pad.append(
+      button(`<button class="cta ghost">Manage players</button>`, () => {
+        ui.view = "players";
+        ui.query = "";
+        render();
+      }),
+      el(`<div class="muted" style="font-size:var(--step--1)">Stars are all a player is ever
+        shown. Changing who is here does not re-make the teams on its own.</div>`),
+    );
     return scroll;
   };
 
@@ -585,6 +627,239 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
     return screen;
   };
 
+  // ------------------------------------------------------- player management
+
+  /** 1–5 stars, tappable. The only level control a person ever sees. */
+  const starPicker = (current: number, onPick: (stars: number) => void): HTMLElement => {
+    const row = el<HTMLElement>(`<div class="starpick" role="group" aria-label="Starting level"></div>`);
+    for (let stars = 1; stars <= 5; stars += 1) {
+      const chosen = stars === current;
+      row.append(
+        button(
+          `<button aria-pressed="${String(chosen)}" aria-label="${String(stars)} stars">${"★".repeat(stars)}</button>`,
+          () => onPick(stars),
+        ),
+      );
+    }
+    return row;
+  };
+
+  const screenPlayers = (db: Db, standings: Standings): HTMLElement => {
+    const screen = el<HTMLElement>(`<div class="phone"></div>`);
+    const head = el<HTMLElement>(`<div class="shead"><span class="t">Players</span></div>`);
+    head.append(
+      button(`<button>Done</button>`, () => {
+        ui.view = "session";
+        ui.editing = null;
+        ui.query = "";
+        render();
+      }),
+    );
+    screen.append(head);
+
+    const scroll = el<HTMLElement>(`<div class="scroll"><div class="pad"></div></div>`);
+    const pad = scroll.firstElementChild as HTMLElement;
+    pad.append(
+      el(`<div class="eyebrow">${String(db.players.length)} in the pool · ${String(
+        db.players.filter((p) => p.active).length,
+      )} active</div>`),
+      searchField(),
+    );
+
+    for (const player of db.players.filter(matches)) {
+      const standing = standings.get(player.id);
+      const played = setsPlayedBy(db, player.id);
+      const row = button(
+        `<button class="prow" aria-pressed="${String(player.active)}">
+          ${avatarHtml(player, avatars)}
+          <span><span class="nm">${text(player.name)}</span><br />
+            <span class="stars">${starString(standing?.stars ?? 3)}</span>
+            <span class="muted" style="font-size:var(--step--1)">${
+              player.active ? "" : " · inactive"
+            }</span></span>
+          <span class="rt">${String(played)} sets</span>
+        </button>`,
+        () => {
+          ui.editing = ui.editing === player.id ? null : player.id;
+          render();
+        },
+      );
+      pad.append(row);
+
+      if (ui.editing === player.id) pad.append(editPanel(player, played));
+    }
+
+    screen.append(scroll);
+
+    const foot = el<HTMLElement>(`<div class="sticky"></div>`);
+    foot.append(
+      button(`<button class="cta">Add players</button>`, () => {
+        ui.view = "add-players";
+        ui.pasteText = "";
+        ui.query = "";
+        render();
+      }),
+    );
+    screen.append(foot);
+    return screen;
+  };
+
+  const editPanel = (player: Player, played: number): HTMLElement => {
+    const panel = el<HTMLElement>(`<div class="card"></div>`);
+
+    const nameField = el<HTMLElement>(`<label class="field">
+        <span class="eyebrow">Name</span>
+        <input type="text" value="${text(player.name)}" aria-label="Name" />
+      </label>`);
+    const nameInput = nameField.querySelector("input") as HTMLInputElement;
+    panel.append(nameField);
+    panel.append(
+      button(`<button class="cta ghost">Save name</button>`, () => {
+        const next = nameInput.value.trim();
+        if (next.length === 0) {
+          ui.error = "A player needs a name.";
+          render();
+          return;
+        }
+        void commit("Renaming", renamePlayer(player.id, next), `Rename to ${next}`);
+      }),
+    );
+
+    panel.append(el(`<div><span class="eyebrow">Starting level</span>
+        <div class="muted" style="font-size:var(--step--1)">This is where their rating
+        <em>began</em>. Changing it re-settles their whole history, which is how a wrong
+        first guess gets fixed.</div></div>`));
+    panel.append(
+      starPicker(seedStarsOf(player), (stars) => {
+        void commit("Changing starting level", setSeedStars(player.id, stars), `Seed ${player.name} at ${String(stars)} stars`);
+      }),
+    );
+
+    panel.append(
+      button(
+        `<button class="cta ghost">${player.active ? "Mark inactive" : "Mark active"}</button>`,
+        () => {
+          void commit(
+            player.active ? "Marking inactive" : "Marking active",
+            setPlayerActive(player.id, !player.active),
+            `${player.active ? "Deactivate" : "Activate"} ${player.name}`,
+          );
+        },
+      ),
+    );
+
+    if (played === 0) {
+      panel.append(
+        button(`<button class="cta ghost">Delete</button>`, () => {
+          void (async () => {
+            if (await commit("Deleting", removePlayer(player.id), `Delete ${player.name}`)) {
+              ui.editing = null;
+              render();
+            }
+          })();
+        }),
+      );
+    } else {
+      panel.append(el(`<div class="muted" style="font-size:var(--step--1)">${text(player.name)} has
+          played ${String(played)} ${played === 1 ? "set" : "sets"}, so they cannot be deleted —
+          their results are part of everyone's ratings. Mark them inactive instead.</div>`));
+    }
+
+    return panel;
+  };
+
+  const screenAddPlayers = (db: Db): HTMLElement => {
+    const screen = el<HTMLElement>(`<div class="phone"></div>`);
+    const head = el<HTMLElement>(`<div class="shead"><span class="t">Add players</span></div>`);
+    head.append(
+      button(`<button>Back</button>`, () => {
+        ui.view = "players";
+        render();
+      }),
+    );
+    screen.append(head);
+
+    const scroll = el<HTMLElement>(`<div class="scroll"><div class="pad"></div></div>`);
+    const pad = scroll.firstElementChild as HTMLElement;
+    pad.append(el(`<p class="muted" style="margin:0">Paste names — one per line, or straight out of
+        the booking sheet. Numbering, reserve labels, prices and payment columns are thrown away.</p>`));
+
+    const area = el<HTMLElement>(`<label class="field">
+        <span class="eyebrow">Names</span>
+        <textarea rows="8" aria-label="Names to add" placeholder="Maria Sz.&#10;Vadim&#10;Cheba"></textarea>
+      </label>`);
+    const textarea = area.querySelector("textarea") as HTMLTextAreaElement;
+    textarea.value = ui.pasteText;
+    textarea.addEventListener("input", () => {
+      ui.pasteText = textarea.value;
+      render({ refocusPaste: true });
+    });
+    pad.append(area);
+
+    const parsed = parseRoster(ui.pasteText, db.players);
+
+    pad.append(el(`<div><span class="eyebrow">Starting level for all of these</span>
+        <div class="muted" style="font-size:var(--step--1)">Set it per player afterwards if they
+        differ — that is the usual case.</div></div>`));
+    pad.append(
+      starPicker(ui.pasteStars, (stars) => {
+        ui.pasteStars = stars;
+        render();
+      }),
+    );
+
+    if (parsed.additions.length > 0) {
+      pad.append(
+        el(`<div class="card"><h2>Will add ${String(parsed.additions.length)}</h2>
+            <div>${parsed.additions.map((n) => text(n)).join(" · ")}</div></div>`),
+      );
+    }
+    if (parsed.duplicates.length > 0) {
+      pad.append(
+        el(`<div class="card"><h2>Already in the pool</h2>
+            <div class="muted">${parsed.duplicates.map((n) => text(n)).join(" · ")}</div></div>`),
+      );
+    }
+    if (parsed.ignored.length > 0) {
+      pad.append(
+        el(`<details class="tools"><summary>Ignored ${String(parsed.ignored.length)} lines</summary>
+            <div class="muted" style="font-size:var(--step--1)">${parsed.ignored
+              .slice(0, 30)
+              .map((n) => text(n))
+              .join(" · ")}</div></details>`),
+      );
+    }
+
+    screen.append(scroll);
+
+    const foot = el<HTMLElement>(`<div class="sticky"></div>`);
+    foot.append(
+      button(
+        `<button class="cta" ${parsed.additions.length === 0 ? "disabled" : ""}>Add ${String(
+          parsed.additions.length,
+        )} ${parsed.additions.length === 1 ? "player" : "players"}</button>`,
+        () => {
+          void (async () => {
+            const names = parsed.additions;
+            if (
+              await commit(
+                "Adding players",
+                addPlayers(names, ui.pasteStars),
+                `Add ${String(names.length)} players`,
+              )
+            ) {
+              ui.pasteText = "";
+              ui.view = "players";
+              render();
+            }
+          })();
+        },
+      ),
+    );
+    screen.append(foot);
+    return screen;
+  };
+
   const shell = (): { screen: HTMLElement; pad: HTMLElement } => {
     const screen = el<HTMLElement>(`<div class="phone"><div class="pad"></div></div>`);
     return { screen, pad: screen.firstElementChild as HTMLElement };
@@ -592,13 +867,17 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
 
   // ------------------------------------------------------------- render
 
-  function render(options?: { refocusSearch?: boolean }): void {
+  function render(options?: { refocusSearch?: boolean; refocusPaste?: boolean }): void {
     const db = store.snapshot();
     const standings = replay(db);
     const session = openSessionOf(db);
 
     let screen: HTMLElement;
-    if (ui.endedSessionId !== null) {
+    if (ui.view === "add-players") {
+      screen = screenAddPlayers(db);
+    } else if (ui.view === "players") {
+      screen = screenPlayers(db, standings);
+    } else if (ui.endedSessionId !== null) {
       screen = screenEnded(db, ui.endedSessionId);
     } else if (ui.picking !== null) {
       screen = screenAttendance(db, standings);
@@ -626,6 +905,13 @@ export function mountApp({ root, store, avatars, token, onForgetToken }: MountOp
       if (input) {
         input.focus();
         input.setSelectionRange(input.value.length, input.value.length);
+      }
+    }
+    if (options?.refocusPaste === true) {
+      const area = root.querySelector<HTMLTextAreaElement>("textarea");
+      if (area) {
+        area.focus();
+        area.setSelectionRange(area.value.length, area.value.length);
       }
     }
   }

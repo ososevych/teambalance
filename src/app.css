@@ -666,3 +666,36 @@ details.tools summary {
 details.tools > *:not(summary) {
   margin-top: 8px;
 }
+
+.starpick {
+  display: flex;
+  gap: 6px;
+}
+
+.starpick button {
+  flex: 1;
+  min-height: 46px;
+  border-radius: 10px;
+  border: 1px solid var(--line);
+  background: var(--surface);
+  color: var(--gold);
+  font-size: 0.72rem;
+  letter-spacing: -0.04em;
+  padding: 0 2px;
+}
+
+.starpick button[aria-pressed="true"] {
+  border-color: var(--ink);
+  box-shadow: inset 0 0 0 1px var(--ink);
+  background: var(--surface-2);
+}
+
+.field textarea {
+  min-height: 160px;
+  padding: 10px 12px;
+  border: 1px solid var(--line);
+  border-radius: 12px;
+  background: var(--surface);
+  resize: vertical;
+  font-family: inherit;
+}

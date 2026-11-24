@@ -11,7 +11,7 @@ Someone known to the system, identified by a stable id and carrying an editable 
 _Avoid_: user, member, account
 
 **Pool**:
-Every player known to the system, active or not. Roughly 20–30 people.
+Every player known to the system, active or not. Currently 19 people, drawn from the registration sheet.
 _Avoid_: roster, squad, team list
 
 **Attendee**:
@@ -28,8 +28,12 @@ _Avoid_: admin, owner
 ### The play
 
 **Session**:
-One evening of play. Carries its attendees, its lineups and its sets.
-_Avoid_: event, game night, meetup
+One booked slot of play — in practice a Sunday 11:00–13:00 court booking. Carries its attendees, its lineups and its sets.
+_Avoid_: event, game night, evening, meetup
+
+**Registration**:
+The organizer's booking sheet, where players sign up for a slot and are listed as places 1–12 plus reserves. It owns who is *expected*; the app owns who actually turned up. Payment and MultiSport status live there and are deliberately not modelled here.
+_Avoid_: signup sheet, attendance list
 
 **Lineup**:
 A generated team assignment — the *plan*. A session has a sequence of them, because a rebalance appends the next one rather than editing the current one.
