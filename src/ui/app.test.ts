@@ -281,3 +281,59 @@ describe("player management", () => {
     expect(store.snapshot().players.map((p) => p.id)).not.toContain("ivan");
   });
 });
+
+describe("throwing away a practice run", () => {
+  it("deletes a session and puts every rating back exactly", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+
+    const before = JSON.stringify([...store.standings().entries()].sort());
+
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+    await click(root, "Save set");
+    await click(root, "Rebalance");
+    await click(root, "Save set");
+    await click(root, "End session");
+    expect(JSON.stringify([...store.standings().entries()].sort())).not.toBe(before);
+
+    // The summary screen offers to bin it straight away.
+    await click(root, "Delete this session");
+    expect(root.textContent).toContain("Really delete");
+    await click(root, "Really delete");
+
+    expect(store.snapshot().sessions).toHaveLength(0);
+    expect(JSON.stringify([...store.standings().entries()].sort())).toBe(before);
+  });
+
+  it("asks before deleting, and keeps the session if told to", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+    await click(root, "Save set");
+    await click(root, "End session");
+    await click(root, "Done");
+
+    await click(root, "Sessions (1)");
+    await click(root, "Delete");
+    await click(root, "Keep");
+    expect(store.snapshot().sessions).toHaveLength(1);
+  });
+
+  it("can reopen a session ended by mistake", async () => {
+    const store = await openStore(dbWithPool());
+    const root = mount(store);
+    await click(root, "Start a session");
+    await click(root, "Make the teams");
+    await click(root, "Save set");
+    await click(root, "End session");
+    await click(root, "Done");
+
+    await click(root, "Sessions (1)");
+    await click(root, "Reopen");
+    expect(store.snapshot().sessions[0]!.closedAt).toBeNull();
+    // Back on the court, with the set still there.
+    expect(root.textContent).toContain("1 set on these teams");
+  });
+});
